@@ -1,137 +1,159 @@
 import streamlit as st
 import ccxt
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor
+import ta
+from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator
 
-# ตั้งค่าหน้าตาของเว็บและสไตล์การแสดงผล
-st.set_page_config(page_title="All-in-One Crypto Scanner", layout="wide")
-st.markdown("<h2 style='text-align: center; color: #F3BA2F;'>📊 All-in-One Quant Scanner</h2>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #848E9C;'>ระบบสแกนรวมทุก Indicator บน Binance Futures ในลิงก์เดียว</p>", unsafe_allow_html=True)
+# ตั้งค่าธีมหน้าเว็บให้แสดงผลแบบกว้างและรองรับ Dark Mode มือถือ
+st.set_page_config(page_title="Binance Futures GUI Multi-Scanner Pro", layout="wide")
+
+# ออกแบบหัวข้อแอปตามสไตล์ GUI ของคุณ
+st.markdown("<h2 style='text-align: center; color: #10b981; font-family: Arial;'>💻 CRYPTO DUAL-SIGNAL SCANNER PRO</h2>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #9ca3af;'>Binance Futures GUI Multi-Scanner Pro (เวอร์ชันพกพาบนมือถือ)</p>", unsafe_allow_html=True)
 st.markdown("---")
 
-# --- ส่วนควบคุมพารามิเตอร์ (Sidebar) ---
-st.sidebar.header("⚙️ ตั้งค่าพารามิเตอร์หลัก")
-tf_choice = st.sidebar.selectbox("1. เลือก Timeframe", ['3m', '5m', '15m', '30m', '1h', '4h'], index=4)
+# --- PANEL 1 & 2: SETUP PARAMETERS (Sidebar) ---
+st.sidebar.markdown("<h3 style='color: #10b981;'>⚙️ ตั้งค่าระบบสแกน</h3>", unsafe_allow_html=True)
 
-# เมนูเลือกเงื่อนไข Indicator ที่ต้องการสแกน
-st.sidebar.markdown("### 🔍 เลือกเงื่อนไขการสแกน")
-scan_mode = st.sidebar.radio(
-    "รูปแบบการกรองข้อมูล",
-    ["แสดงทุกเหรียญที่ติดสัญญาณใดสัญญาณหนึ่ง", "แสดงเฉพาะเหรียญที่ติดทุกสัญญาณพร้อมกัน (Combo)"]
+# ติ๊กเลือกช่วงเวลาแท่งเทียน (Timeframe)
+tf_choice = st.sidebar.selectbox(
+    "เลือกช่วงเวลาแท่งเทียน (Timeframe):", 
+    ["3m", "5m", "15m", "1h", "4h", "1d"], 
+    index=3  # เลือก 1h เป็นค่าเริ่มต้นตามโค้ดของคุณ
 )
 
-# กล่องติ๊กเลือกเปิด-ปิด Indicator แต่ละตัว
-use_smc = st.sidebar.checkbox("ใช้งาน SMC (Bullish FVG)", value=True)
-use_breakout = st.sidebar.checkbox("ใช้งาน Price Breakout", value=True)
-use_rsi = st.sidebar.checkbox("ใช้งาน RSI (Oversold/Overbought)", value=True)
+st.sidebar.markdown("### 🔍 ตั้งค่าตัวกรองและพารามิเตอร์ระบบ")
 
-# ปรับค่าพารามิเตอร์แบบละเอียด
-with st.sidebar.expander("🛠️ ปรับค่าพารามิเตอร์ Indicator"):
-    lookback = st.number_input("ระยะ Breakout (แท่งย้อนหลัง)", min_value=5, max_value=100, value=20)
-    rsi_per = st.number_input("RSI Period", min_value=2, max_value=50, value=14)
-    rsi_low = st.number_input("RSI Oversold (แนวรับ)", min_value=10, max_value=40, value=30)
-    rsi_high = st.number_input("RSI Overbought (แนวต้าน)", min_value=60, max_value=90, value=70)
-    min_volume = st.number_input("ขั้นต่ำ Volume 24ชม. (USDT)", min_value=0, value=1000000, step=500000)
+# ตัวกรอง RSI
+scan_rsi = st.sidebar.checkbox("ใช้งาน RSI (Oversold/Overbought)", value=True)
+with st.sidebar.expander("📊 ปรับค่าพารามิเตอร์ RSI", expanded=scan_rsi):
+    rsi_low = st.number_input("RSI ซื้อเมื่อ <= (Oversold)", min_value=1.0, max_value=50.0, value=35.0)
+    rsi_high = st.number_input("RSI ขายเมื่อ >= (Overbought)", min_value=50.0, max_value=99.0, value=65.0)
+    rsi_len = st.number_input("ความยาว RSI (Length)", min_value=2, max_value=50, value=14)
 
-scan_btn = st.sidebar.button("🚀 เริ่มสแกนเนอร์ระบบรวม", type="primary", use_container_width=True)
+# ตัวกรอง EMA
+scan_ema = st.sidebar.checkbox("ใช้งาน EMA Cross (ราคาตัดเส้น)", value=True)
+with st.sidebar.expander("📈 ปรับค่าพารามิเตอร์ EMA", expanded=scan_ema):
+    ema_len = st.number_input("EMA ตัดขึ้น/ลง เส้นความยาว:", min_value=2, max_value=200, value=50)
 
-# --- ใช้ Endpoint ทางเลือกเพื่อหลบการตรวจจับ IP Data Center ---
-exchange = ccxt.binance({
-    'options': {
-        'defaultType': 'future',
-        'adjustForTimeDifference': True
-    },
-    'urls': {
-        'api': {
-            'public': 'https://usdt.com', # ตัวเลือกที่ 1
-            'private': 'https://usdt.com',
-        }
-    }
-})
+# ตัวกรอง SMC
+scan_smc = st.sidebar.checkbox("ใช้งาน SMC / Breakout", value=True)
+with st.sidebar.expander("🧱 ปรับค่าพารามิเตอร์ SMC", expanded=scan_smc):
+    smc_len = st.number_input("SMC ทะลุ High/Low ย้อนหลัง:", min_value=5, max_value=100, value=20)
 
+# ปุ่มสั่งสแกนดีไซน์สีเขียวสะดุดตา
+scan_btn = st.sidebar.button("🔄 เริ่มสแกนสัญญาณ ซื้อ & ขาย ตลาด Futures", type="primary", use_container_width=True)
 
-def calculate_and_scan(symbol):
-    try:
-        # ดึงข้อมูลแท่งเทียนย้อนหลัง 100 แท่ง
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=tf_choice, limit=100)
-        if not ohlcv or len(ohlcv) < max(int(lookback), int(rsi_per)) + 2:
-            return None
-            
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        
-        # คำนวณมูลค่าซื้อขายแท่งล่าสุดเพื่อกรองเหรียญไม่มีสภาพคล่อง
-        last_volume_usdt = df['volume'].iloc[-1] * df['close'].iloc[-1]
-        if last_volume_usdt < min_volume:
-            return None
+# เชื่อมต่อ Binance Futures ด้วยรูปแบบพาสแกนผ่านชัวร์ๆ 
+exchange = ccxt.binance({'options': {'defaultType': 'future'}})
 
-        # 1. คำนวณ RSI
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=int(rsi_per)).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=int(rsi_per)).mean()
-        rs = gain / (loss + 1e-10)
-        df['rsi'] = 100 - (100 / (1 + rs))
-
-        # 2. คำนวณ Breakout (ราคาทะลุ High สูงสุดย้อนหลัง ไม่รวมแท่งปัจจุบัน)
-        df['highest_high'] = df['high'].shift(1).rolling(window=int(lookback)).max()
-        df['lowest_low'] = df['low'].shift(1).rolling(window=int(lookback)).min()
-        
-        # 3. คำนวณ SMC (Bullish FVG และ Bearish FVG)
-        df['fvg_bullish'] = df['low'] > df['high'].shift(2)
-        df['fvg_bearish'] = df['high'] < df['low'].shift(2)
-
-        last_row = df.iloc[-1]
-        
-        # ตรวจสอบสถานะแต่ละ Indicator
-        is_breakout_up = last_row['close'] > last_row['highest_high']
-        is_breakout_down = last_row['close'] < last_row['lowest_low']
-        is_fvg_bull = last_row['fvg_bullish']
-        is_fvg_bear = last_row['fvg_bearish']
-        is_rsi_os = last_row['rsi'] < rsi_low
-        is_rsi_ob = last_row['rsi'] > rsi_high
-
-        # รวบรวมสัญญาณที่เกิดขึ้นจริง
-        signals = []
-        if use_breakout and is_breakout_up: signals.append("🟩 Breakout UP")
-        if use_breakout and is_breakout_down: signals.append("🟥 Breakout DOWN")
-        if use_smc and is_fvg_bull: signals.append("🟩 Bullish FVG (SMC)")
-        if use_smc and is_fvg_bear: signals.append("🟥 Bearish FVG (SMC)")
-        if use_rsi and is_rsi_os: signals.append("🟩 RSI Oversold")
-        if use_rsi and is_rsi_ob: signals.append("🟥 RSI Overbought")
-
-        # ตรวจสอบเงื่อนไขตามโหมดที่ผู้ใช้เลือก
-        if scan_mode == "แสดงเฉพาะเหรียญที่ติดทุกสัญญาณพร้อมกัน (Combo)":
-            active_count = sum([use_smc, use_breakout, use_rsi])
-            if len(signals) >= active_count and len(signals) > 0:
-                return {"Symbol": symbol.replace(':USDT', ''), "Price": float(last_row['close']), "RSI": round(float(last_row['rsi']), 2), "Signal": " & ".join(signals)}
-        else:
-            if signals:
-                return {"Symbol": symbol.replace(':USDT', ''), "Price": float(last_row['close']), "RSI": round(float(last_row['rsi']), 2), "Signal": " | ".join(signals)}
-                
-    except:
-        pass
-    return None
-
-# --- ส่วนประมวลผลหน้าเว็บหลัก ---
+# --- ส่วนประมวลผลการสแกนราคาสด ---
 if scan_btn:
-    if not (use_smc or use_breakout or use_rsi):
-        st.warning("⚠️ โปรดเลือกเปิดใช้งาน Indicator อย่างน้อย 1 ตัวที่แถบด้านข้างก่อนกดสแกนครับ")
+    if not (scan_rsi or scan_ema or scan_smc):
+        st.warning("⚠️ กรุณาเลือกเงื่อนไข Indicator อย่างน้อย 1 ตัวก่อนเริ่มสแกนครับ")
     else:
-        with st.spinner(f"🔄 ระบบกำลังสแกนเหรียญที่ตรงเงื่อนไขใน Timeframe: {tf_choice} ..."):
+        # กล่องจำลองสเตตัสโหลดแบบเดียวกับโปรแกรมเดิมของคุณ
+        with st.spinner(f"⌛ กำลังสแกนตลาดฟิวเจอร์สทั้งหมด (TF: {tf_choice})..."):
             try:
                 exchange.load_markets()
-                symbols = [s for s in exchange.symbols if s.endswith(':USDT')]
+                
+                # ถอดรูปรหัสคู่เหรียญแบบดั้งเดิมที่ Binance ปล่อยผ่าน
+                symbols_to_scan = [s for s in exchange.symbols if '/USDT' in s and ':' not in s]
+                
+                # แนะนำกรองสแกนช่วง 40 คู่เหรียญแรก เพื่อป้องกันระบบหน่วงบนเว็บบราวเซอร์มือถือ
+                symbols_to_scan = symbols_to_scan[:40] 
                 
                 matched_list = []
-                with ThreadPoolExecutor(max_workers=20) as executor:
-                    results = executor.map(calculate_and_scan, symbols)
-                    for r in results:
-                        if r: matched_list.append(r)
+                detected_count = 0
                 
-                if matched_list:
-                    st.success(f"🔥 สแกนเสร็จสิ้น! พบเหรียญที่เข้าเงื่อนไข {len(matched_list)} คู่เหรียญ")
-                    df_res = pd.DataFrame(matched_list)
-                    st.dataframe(df_res, use_container_width=True, hide_index=True)
+                for symbol in symbols_to_scan:
+                    try:
+                        max_limit = max(150, int(rsi_len) + 50, int(ema_len) + 50, int(smc_len) + 50)
+                        bars = exchange.fetch_ohlcv(symbol, timeframe=tf_choice, limit=max_limit)
+                        
+                        if len(bars) < max_limit - 30: 
+                            continue
+                            
+                        df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                        symbol_clean = symbol.replace('/USDT', '')
+                        last_price = df['close'].iloc[-1]
+                        prev_price = df['close'].iloc[-2]
+
+                        # --- 1. ตรวจสอบเงื่อนไข RSI ---
+                        if scan_rsi:
+                            rsi_init = RSIIndicator(close=df['close'], window=int(rsi_len))
+                            df['RSI'] = rsi_init.rsi()
+                            last_rsi = df['RSI'].iloc[-1]
+                            
+                            if last_rsi <= rsi_low:
+                                matched_list.append({
+                                    "คู่เหรียญ": symbol_clean, "ราคาปัจจุบัน": f"${last_price:,}",
+                                    "ประเภทอินดิเคเตอร์": f"RSI ({rsi_len})", "เงื่อนไขเทคนิคอลที่เกิดขึ้น": f"Oversold (RSI: {last_rsi:.2f})", "คำแนะนำสัญญาณ": "🟢 BUY / LONG"
+                                })
+                                detected_count += 1
+                                continue 
+                            elif last_rsi >= rsi_high:
+                                matched_list.append({
+                                    "คู่เหรียญ": symbol_clean, "ราคาปัจจุบัน": f"${last_price:,}",
+                                    "ประเภทอินดิเคเตอร์": f"RSI ({rsi_len})", "เงื่อนไขเทคนิคอลที่เกิดขึ้น": f"Overbought (RSI: {last_rsi:.2f})", "คำแนะนำสัญญาณ": "🔴 SELL / SHORT"
+                                })
+                                detected_count += 1
+                                continue
+
+                        # --- 2. ตรวจสอบเงื่อนไข EMA ---
+                        if scan_ema:
+                            ema_init = EMAIndicator(close=df['close'], window=int(ema_len))
+                            df['EMA'] = ema_init.ema_indicator()
+                            last_ema = df['EMA'].iloc[-1]
+                            prev_ema = df['EMA'].iloc[-2]
+                            
+                            if prev_price < prev_ema and last_price > last_ema:
+                                matched_list.append({
+                                    "คู่เหรียญ": symbol_clean, "ราคาปัจจุบัน": f"${last_price:,}",
+                                    "ประเภทอินดิเคเตอร์": f"EMA ({ema_len})", "เงื่อนไขเทคนิคอลที่เกิดขึ้น": f"ราคาตัดทะลุขึ้น ยืนเหนือเส้น EMA {ema_len}", "คำแนะนำสัญญาณ": "🟢 BUY / LONG"
+                                })
+                                detected_count += 1
+                                continue
+                            elif prev_price > prev_ema and last_price < last_ema:
+                                matched_list.append({
+                                    "คู่เหรียญ": symbol_clean, "ราคาปัจจุบัน": f"${last_price:,}",
+                                    "ประเภทอินดิเคเตอร์": f"EMA ({ema_len})", "เงื่อนไขเทคนิคอลที่เกิดขึ้น": f"ราคาตัดดิ่งหลุด ใต้เส้น EMA {ema_len}", "คำแนะนำสัญญาณ": "🔴 SELL / SHORT"
+                                })
+                                detected_count += 1
+                                continue
+
+                        # --- 3. ตรวจสอบเงื่อนไข SMC / Breakout ---
+                        if scan_smc:
+                            highest_prev = df['high'].shift(1).rolling(window=int(smc_len)).max().iloc[-1]
+                            if last_price > highest_prev:
+                                matched_list.append({
+                                    "คู่เหรียญ": symbol_clean, "ราคาปัจจุบัน": f"${last_price:,}",
+                                    "ประเภทอินดิเคเตอร์": "SMC / Break", "เงื่อนไขเทคนิคอลที่เกิดขึ้น": f"ทะลุ High รอบ {smc_len} แท่ง (${highest_prev:,})", "คำแนะนำสัญญาณ": "🟢 BUY / LONG"
+                                })
+                                detected_count += 1
+                                continue
+                                
+                            lowest_prev = df['low'].shift(1).rolling(window=int(smc_len)).min().iloc[-1]
+                            if last_price < lowest_prev:
+                                matched_list.append({
+                                    "คู่เหรียญ": symbol_clean, "ราคาปัจจุบัน": f"${last_price:,}",
+                                    "ประเภทอินดิเคเตอร์": "SMC / Break", "เงื่อนไขเทคนิคอลที่เกิดขึ้น": f"ดิ่งหลุด Low รอบ {smc_len} แท่ง (${lowest_prev:,})", "คำแนะนำสัญญาณ": "🔴 SELL / SHORT"
+                                })
+                                detected_count += 1
+                                continue
+                    except:
+                        continue
+                
+                # --- แสดงผลลัพธ์ผ่านหน้าจอหลัก (ตารางแบบ Treeview ดั้งเดิม) ---
+                if detected_count == 0:
+                    st.info(f"ℹ️ สแกนเสร็จสิ้นใน TF {tf_choice} แต่ไม่พบเหรียญที่ตรงเงื่อนไขในรอบนี้ครับ")
                 else:
-                    st.info("ไม่พบเหรียญที่ตรงตามเงื่อนไขที่เลือกในแท่งเทียนปัจจุบัน ลองเปลี่ยนโหมดหรือปรับค่าพารามิเตอร์ให้กว้างขึ้น")
+                    st.success(f"🎉 สแกนเสร็จสิ้นใน TF {tf_choice}! พบเหรียญเข้าเงื่อนไขทั้งหมด {detected_count} รายการ")
+                    df_res = pd.DataFrame(matched_list)
+                    
+                    # พ่นตารางรูปแบบ Interactive ปรับแต่งตามขนาดจอมือถืออัตโนมัติ
+                    st.dataframe(df_res, use_container_width=True, hide_index=True)
+                    
             except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการเชื่อมต่อระบบ: {e}")
+                st.error(f"เกิดข้อผิดพลาดรุนแรงในระบบคำนวณ: {str(e)}")
