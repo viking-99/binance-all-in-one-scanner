@@ -42,7 +42,7 @@ exchange = ccxt.binance({
     },
     'urls': {
         'api': {
-            'public': 'https://https://fapi.binance.com', # สลับมาใช้ fapi2
+            'public': 'https://fapi.binance.com/fapi/v1/klines', # สลับมาใช้ fapi2
         }
     }
 })
